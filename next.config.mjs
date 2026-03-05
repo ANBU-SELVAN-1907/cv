@@ -14,9 +14,16 @@ const nextConfig = withPWA({
     typescript: {
         ignoreBuildErrors: true,
     },
-    webpack: (config) => {
+    webpack: (config, { isServer }) => {
         config.resolve.fallback = { fs: false };
         config.module.exprContextCritical = false;
+
+        // Ignore the "Critical dependency" warnings from face-api
+        config.ignoreWarnings = [
+            { module: /node_modules\/@vladmandic\/face-api/ },
+            { message: /Critical dependency: require function is used in a way/ }
+        ];
+
         return config;
     }
 });
