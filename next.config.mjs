@@ -13,6 +13,11 @@ const nextConfig = withPWA({
     },
     typescript: {
         ignoreBuildErrors: true,
+    },
+    webpack: (config) => {
+        config.resolve.fallback = { fs: false };
+        config.module.exprContextCritical = false;
+        return config;
     }
 });
 
