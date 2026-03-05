@@ -15,13 +15,15 @@ const nextConfig = withPWA({
         ignoreBuildErrors: true,
     },
     webpack: (config, { isServer }) => {
-        config.resolve.fallback = { fs: false };
+        config.resolve.fallback = { fs: false, path: false, crypto: false };
         config.module.exprContextCritical = false;
+        config.module.unknownContextCritical = false;
 
-        // Ignore the "Critical dependency" warnings from face-api
+        // Ignore the "Critical dependency" warnings
         config.ignoreWarnings = [
-            { module: /node_modules\/@vladmandic\/face-api/ },
-            { message: /Critical dependency: require function is used in a way/ }
+            ...(config.ignoreWarnings || []),
+            /Critical dependency: require function is used in a way/,
+            /node_modules\/@vladmandic\/face-api/
         ];
 
         return config;
