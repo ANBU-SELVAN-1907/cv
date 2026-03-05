@@ -8,7 +8,7 @@ import { processIDCard } from '@/lib/OCRProcessor';
 import { validateDuplicate } from '@/lib/DuplicateValidator';
 import { supabase } from '@/lib/supabaseClient';
 import { saveOfflineStudent, getUnsyncedStudents, markStudentSynced } from '@/lib/offlineStorage';
-import { CheckCircle2, AlertTriangle, Wifi, WifiOff, LayoutDashboard, UserCheck, Loader2, QrCode, ShieldCheck } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, LayoutDashboard, UserCheck, Loader2, ShieldCheck } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
@@ -51,7 +51,7 @@ export default function RegistrationPage() {
         return publicUrl;
     };
 
-    // Sync Logic: Cron-like behavior to sync in order
+    // Sync Logic: Auto-sync offline records to Supabase when connectivity returns
     useEffect(() => {
         const handleOnline = () => setIsOnline(true);
         const handleOffline = () => setIsOnline(false);
@@ -62,40 +62,52 @@ export default function RegistrationPage() {
         const syncInterval = setInterval(async () => {
             if (window.navigator.onLine) {
                 const pending = await getUnsyncedStudents();
-                // ORDERLY: Sort by created_at to ensure chronological order
+                // Sort by created_at to sync in chronological order
                 const sortedPending = pending.sort((a, b) =>
                     new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
                 );
 
                 setSyncCount(sortedPending.length);
                 if (sortedPending.length > 0) {
-                    console.log(`📡 YOLO: Syncing ${sortedPending.length} records in order...`);
-                    for (const { id: offlineId, synced, ...studentData } of sortedPending) {
+                    console.log(`📡 YOLO: Syncing ${sortedPending.length} offline records...`);
+                    for (const { id: offlineId, synced, photo_base64, image_url, face_embedding, ...studentData } of sortedPending) {
                         try {
-                            let liveImageUrl = studentData.image_url;
-
-                            // If it's a base64 (offline captured), upload it now
-                            if (liveImageUrl && liveImageUrl.startsWith('data:image')) {
-                                liveImageUrl = await uploadImage(liveImageUrl, studentData.roll_number);
+                            // Upload base64 photo to Supabase Storage (was saved locally when offline)
+                            let liveImageUrl: string | null = null;
+                            const photoToUpload = photo_base64 || image_url;
+                            if (photoToUpload && photoToUpload.startsWith('data:image')) {
+                                try {
+                                    liveImageUrl = await uploadImage(photoToUpload, studentData.roll_number);
+                                    console.log(`📸 SYNC: Photo uploaded for ${studentData.roll_number}`);
+                                } catch (photoErr) {
+                                    console.warn(`⚠️ SYNC: Photo upload failed for ${studentData.roll_number}`, photoErr);
+                                }
                             }
 
                             const { error: syncError } = await supabase.from('students').insert({
                                 ...studentData,
                                 image_url: liveImageUrl,
                                 synced_from_offline: true,
-                                created_at: studentData.created_at // Preserve original timestamp
+                                created_at: studentData.created_at, // Preserve original timestamp
+                                face_embedding: (face_embedding && face_embedding.length === 128)
+                                    ? `[${face_embedding.join(',')}]`
+                                    : null,
                             });
 
                             if (!syncError) {
                                 await markStudentSynced(offlineId!);
+                                console.log(`✅ SYNCED: ${studentData.roll_number}`);
+                            } else {
+                                console.error(`❌ SYNC FAIL for ${studentData.roll_number}:`, syncError.message);
                             }
                         } catch (err) {
-                            console.error("Sync Error for record:", offlineId, err);
+                            console.error('Sync Error for record:', offlineId, err);
                         }
                     }
                 }
             }
         }, 15000); // Check every 15s
+
 
         return () => {
             window.removeEventListener('online', handleOnline);
@@ -156,64 +168,109 @@ export default function RegistrationPage() {
         setError(null);
 
         try {
-            let finalImageUrl = capturedImage;
+            const registeredAt = new Date().toISOString();
 
+            // ─── STEP 1: Duplicate check (online only) ──────────────────────
             if (isOnline) {
-                // Online: High-Secure Duplicate Check (only if embedding exists)
                 const { isDuplicate, reason, student } = await validateDuplicate(
                     formData.roll_number,
                     capturedData.face_embedding || []
                 );
-
                 if (isDuplicate) {
                     if (student) {
                         setCurrentStudent(student);
                         setStep('duplicate');
                     } else {
-                        setError(reason || "Student already exists.");
+                        setError(reason || 'Student already exists.');
                     }
                     setIsLoading(false);
                     return;
                 }
-
-                // Upload to Storage
-                if (capturedImage) {
-                    finalImageUrl = await uploadImage(capturedImage, formData.roll_number);
-                }
             }
 
+            // ─── STEP 2: ALWAYS save to local IndexedDB (with photo as base64) ─
+            // This is the permanent local backup — works offline, holds full photo
+            try {
+                await saveOfflineStudent({
+                    full_name: formData.full_name,
+                    roll_number: formData.roll_number,
+                    college: formData.college,
+                    department: formData.department,
+                    year: formData.year,
+                    face_embedding: capturedData.face_embedding,
+                    image_url: capturedImage || undefined,
+                    photo_base64: capturedImage || undefined,
+                    check_in_status: false,
+                    created_at: registeredAt,
+                    synced_from_offline: false,
+                });
+                console.log('✅ LOCAL: Student + photo saved to IndexedDB');
+            } catch (localErr) {
+                console.warn('⚠️ LOCAL: Could not save to IndexedDB:', localErr);
+            }
+
+            // ─── STEP 3: Upload photo to Supabase Storage + save record ──────
+            let supabaseImageUrl: string | undefined = undefined;
+
+            if (isOnline) {
+                try {
+                    // 3a. Upload photo to Supabase Storage
+                    if (capturedImage) {
+                        supabaseImageUrl = await uploadImage(capturedImage, formData.roll_number);
+                        console.log('✅ SUPABASE STORAGE: Photo uploaded →', supabaseImageUrl);
+                    }
+
+                    // 3b. Insert full student record (text + photo URL) into Supabase DB
+                    const { error: insertError } = await supabase.from('students').insert({
+                        full_name: formData.full_name,
+                        roll_number: formData.roll_number,
+                        college: formData.college,
+                        department: formData.department,
+                        year: formData.year,
+                        image_url: supabaseImageUrl || null,
+                        check_in_status: false,
+                        created_at: registeredAt,
+                        synced_from_offline: false,
+                        face_embedding: (capturedData.face_embedding && capturedData.face_embedding.length === 128)
+                            ? `[${capturedData.face_embedding.join(',')}]`
+                            : null,
+                    });
+
+                    if (insertError) {
+                        console.error('❌ SUPABASE DB: Insert failed:', insertError.message);
+                        setError(`Saved locally. Supabase error: ${insertError.message}`);
+                    } else {
+                        console.log('✅ SUPABASE DB: Student record saved');
+                    }
+                } catch (supabaseErr: any) {
+                    console.error('❌ SUPABASE: Error:', supabaseErr.message);
+                    setError('Saved locally. Will auto-sync to Supabase when reconnected.');
+                }
+            } else {
+                console.log('📴 OFFLINE: Data saved locally, will sync to Supabase when reconnected.');
+            }
+
+            // ─── STEP 4: Show success regardless ────────────────────────────
             const finalStudent: Omit<Student, 'id'> = {
                 ...formData,
                 face_embedding: capturedData.face_embedding,
-                image_url: finalImageUrl,
+                image_url: supabaseImageUrl || capturedImage || undefined,
                 check_in_status: false,
-                created_at: new Date().toISOString(),
-                synced_from_offline: !isOnline
+                created_at: registeredAt,
+                synced_from_offline: !isOnline,
             };
-
-            if (isOnline) {
-                const { error: insertError } = await supabase.from('students').insert({
-                    ...finalStudent,
-                    // Ensure embedding is exactly 128 and valid
-                    face_embedding: (finalStudent.face_embedding && finalStudent.face_embedding.length === 128)
-                        ? `[${finalStudent.face_embedding.join(',')}]`
-                        : null
-                });
-                if (insertError) throw new Error(`Database Error: ${insertError.message}`);
-            } else {
-                // Offline Store: Ready for Auto-Sync
-                await saveOfflineStudent(finalStudent);
-            }
 
             setCurrentStudent(finalStudent as Student);
             setStep('success');
+
         } catch (err: any) {
-            console.error("🏁 YOLO Submit Error:", err);
-            setError(err.message || "Failed to finalize registration.");
+            console.error('🏁 YOLO Submit Error:', err);
+            setError(err.message || 'Failed to finalize registration.');
         } finally {
             setIsLoading(false);
         }
     };
+
 
     return (
         <div className="min-h-screen bg-[#0a0a0a] text-white p-6 md:p-12 relative overflow-hidden font-sans">
