@@ -71,8 +71,7 @@ export default function Home() {
           variants={itemVariants}
           className="text-lg md:text-2xl text-gray-400 font-light max-w-2xl mx-auto mb-16 leading-relaxed balance tracking-tight"
         >
-          Next-generation student identity infrastructure. AI-driven verification,
-          biometric mapping, and distributed edge synchronization.
+          HITS AND INTER- COLLEGE DATA ENTRY
         </motion.p>
 
         <motion.div
